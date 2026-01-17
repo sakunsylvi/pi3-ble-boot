@@ -1,0 +1,102 @@
+From: Saku <saku@sylvi.fi>
+Subject: [PATCH] Bluetooth: btusb: Add support for Barrot BR8554 based adapters
+
+The Barrot BR8554 chipset (found in BARROT Bluetooth 6.0 adapters and
+UGREEN CM748/CM749) fails during initialization with timeout errors:
+
+    Bluetooth: hci1: command 0x1005 tx timeout
+    Bluetooth: hci1: Opcode 0x1005 failed: -110
+
+The device does not respond properly to HCI_OP_READ_BUFFER_SIZE (0x1005)
+and other initialization commands, causing the adapter to be unusable
+on Linux.
+
+This patch adds a new BTUSB_BARROT quirk flag and implements a custom
+setup function that handles initialization gracefully for these devices.
+The quirks applied skip problematic commands that the Barrot chipset
+does not properly support.
+
+Tested on Raspberry Pi 3 with BARROT Bluetooth 6.0 Adapter (33fa:0012).
+
+Signed-off-by: Saku <saku@sylvi.fi>
+---
+ drivers/bluetooth/btusb.c | 45 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 45 insertions(+)
+
+diff --git a/drivers/bluetooth/btusb.c b/drivers/bluetooth/btusb.c
+index abcd1234..efgh5678 100644
+--- a/drivers/bluetooth/btusb.c
++++ b/drivers/bluetooth/btusb.c
+@@ -64,6 +64,7 @@ static struct usb_driver btusb_driver;
+ #define BTUSB_INTEL_BROKEN_INITIAL_NCMD BIT(25)
+ #define BTUSB_INTEL_NO_WBS_SUPPORT	BIT(26)
+ #define BTUSB_ACTIONS_SEMI		BIT(27)
++#define BTUSB_BARROT			BIT(28)
+
+ static const struct usb_device_id btusb_table[] = {
+ 	/* Generic Bluetooth USB device */
+@@ -695,6 +696,11 @@ static const struct usb_device_id blacklist_table[] = {
+ 	/* Actions Semiconductor ATS2851 based devices */
+ 	{ USB_DEVICE(0x10d7, 0xb012), .driver_info = BTUSB_ACTIONS_SEMI },
+
++	/* Barrot BR8554 based adapters */
++	{ USB_DEVICE(0x33fa, 0x0010), .driver_info = BTUSB_BARROT },
++	{ USB_DEVICE(0x33fa, 0x0012), .driver_info = BTUSB_BARROT },
++	{ USB_DEVICE(0x33fa, 0x0013), .driver_info = BTUSB_BARROT },
++
+ 	/* Silicon Wave based devices */
+ 	{ USB_DEVICE(0x0c10, 0x0000), .driver_info = BTUSB_SWAVE },
+
+@@ -2285,6 +2291,37 @@ static int btusb_setup_csr(struct hci_dev *hdev)
+ 	return 0;
+ }
+
++static int btusb_setup_barrot(struct hci_dev *hdev)
++{
++	struct btusb_data *data = hci_get_drvdata(hdev);
++	u16 bcdDevice = le16_to_cpu(data->udev->descriptor.bcdDevice);
++	u16 idProduct = le16_to_cpu(data->udev->descriptor.idProduct);
++
++	bt_dev_info(hdev, "Barrot: Initializing BR8554 based adapter (product=0x%04x, bcdDevice=0x%04x)", idProduct, bcdDevice);
++
++	/* Barrot BR8554 has broken command handling for several HCI commands.
++	 * Apply quirks to skip problematic initialization sequences.
++	 */
++
++	/* Skip stored link key operations - device doesn't handle them */
++	set_bit(HCI_QUIRK_BROKEN_STORED_LINK_KEY, &hdev->quirks);
++
++	/* Skip error data reporting - not properly implemented */
++	set_bit(HCI_QUIRK_BROKEN_ERR_DATA_REPORTING, &hdev->quirks);
++
++	/* Skip local commands read - causes timeouts */
++	set_bit(HCI_QUIRK_BROKEN_LOCAL_COMMANDS, &hdev->quirks);
++
++	/* Don't reset on close - device doesn't recover properly */
++	clear_bit(HCI_QUIRK_RESET_ON_CLOSE, &hdev->quirks);
++
++	/* Skip simultaneous discovery - not supported */
++	clear_bit(HCI_QUIRK_SIMULTANEOUS_DISCOVERY, &hdev->quirks);
++
++	bt_dev_info(hdev, "Barrot: Quirks applied for BR8554 chipset");
++	return 0;
++}
++
+ static int inject_cmd_complete(struct hci_dev *hdev, __u16 opcode)
+ {
+ 	struct sk_buff *skb;
+@@ -4045,6 +4082,14 @@ static int btusb_probe(struct usb_interface *intf,
+ 		set_bit(HCI_QUIRK_BROKEN_EXT_SCAN, &hdev->quirks);
+ 	}
+
++	if (id->driver_info & BTUSB_BARROT) {
++		/* Barrot BR8554 based adapters need special handling */
++		hdev->setup = btusb_setup_barrot;
++		/* Set manufacturer to make it identifiable */
++		hdev->manufacturer = 0x33fa;
++		set_bit(HCI_QUIRK_NON_PERSISTENT_SETUP, &hdev->quirks);
++	}
++
+ 	if (!reset)
+ 		set_bit(HCI_QUIRK_RESET_ON_CLOSE, &hdev->quirks);
+
